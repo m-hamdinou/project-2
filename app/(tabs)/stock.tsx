@@ -365,6 +365,7 @@ const styles = StyleSheet.create({
   },
   searchInputRTL: { flexDirection: 'row-reverse' },
   searchTextInput: { flex: 1, paddingVertical: spacing.md, paddingHorizontal: spacing.sm, fontSize: fontSize.md, color: colors.text },
+  textInputRTL: { textAlign: 'right' },
   listContent: { padding: spacing.lg, paddingTop: 0, paddingBottom: 100 },
   productCard: {
     backgroundColor: colors.surface,

@@ -280,6 +280,7 @@ const styles = StyleSheet.create({
   },
   searchInputRTL: { flexDirection: 'row-reverse' },
   searchTextInput: { flex: 1, paddingVertical: spacing.md, paddingHorizontal: spacing.sm, fontSize: fontSize.md, color: colors.text },
+  textInputRTL: { textAlign: 'right' },
   filterButton: {
     width: 48,
     height: 48,

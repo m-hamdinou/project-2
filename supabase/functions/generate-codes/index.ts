@@ -3,26 +3,23 @@ import { createClient } from 'npm:@supabase/supabase-js@2.58.0';
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Info, Apikey, X-Admin-Key',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Client-Info, Apikey',
 };
 
 interface GenerateCodesRequest {
   count: number;
   expirationDays: number;
-  adminKey: string;
 }
 
-// Generate a random code avoiding confusing characters
 function generateCode(length: number = 8): string {
-  // Avoid 0/O and 1/I/l for readability
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
   let code = '';
-  
+
   for (let i = 0; i < length; i++) {
     const randomIndex = Math.floor(Math.random() * chars.length);
     code += chars[randomIndex];
   }
-  
+
   return code;
 }
 
@@ -35,14 +32,10 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    // Parse request body
-    const { count, expirationDays, adminKey }: GenerateCodesRequest = await req.json();
-
-    // Validate admin key
-    const expectedAdminKey = Deno.env.get('ADMIN_KEY') || '123456';
-    if (!adminKey || adminKey !== expectedAdminKey) {
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
       return new Response(
-        JSON.stringify({ error: 'Unauthorized: Invalid admin key' }),
+        JSON.stringify({ error: 'Non authentifié' }),
         {
           status: 401,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -50,10 +43,56 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Validate inputs
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+
+    const supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: {
+        headers: {
+          Authorization: authHeader,
+        },
+      },
+    });
+
+    const {
+      data: { user: authUser },
+      error: authError,
+    } = await supabaseClient.auth.getUser();
+
+    if (authError || !authUser) {
+      return new Response(
+        JSON.stringify({ error: 'Non authentifié' }),
+        {
+          status: 401,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
+
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from('profiles')
+      .select('role')
+      .eq('id', authUser.id)
+      .maybeSingle();
+
+    if (profileError || !profile || profile.role !== 'admin') {
+      return new Response(
+        JSON.stringify({ error: 'Accès refusé. Rôle admin requis.' }),
+        {
+          status: 403,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    const { count, expirationDays }: GenerateCodesRequest = await req.json();
+
     if (!count || count < 1 || count > 1000) {
       return new Response(
-        JSON.stringify({ error: 'Count must be between 1 and 1000' }),
+        JSON.stringify({ error: 'Le nombre doit être entre 1 et 1000' }),
         {
           status: 400,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -63,7 +102,7 @@ Deno.serve(async (req: Request) => {
 
     if (!expirationDays || expirationDays < 1) {
       return new Response(
-        JSON.stringify({ error: 'Expiration days must be at least 1' }),
+        JSON.stringify({ error: 'La durée d\'expiration doit être d\'au moins 1 jour' }),
         {
           status: 400,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -71,40 +110,32 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Create Supabase client with service role
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
-    // Calculate expiration date
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + expirationDays);
 
-    // Generate codes
-    const codes: Array<{ code: string; expires_at: string }> = [];
+    const codes: Array<{ code: string; expires_at: string; created_by_admin_id: string }> = [];
     const generatedCodes = new Set<string>();
 
     while (generatedCodes.size < count) {
       const code = generateCode(8);
-      
-      // Check if code already exists in database
-      const { data: existingCode } = await supabase
+
+      const { data: existingCode } = await supabaseAdmin
         .from('activation_codes')
         .select('code')
         .eq('code', code)
-        .single();
+        .maybeSingle();
 
       if (!existingCode && !generatedCodes.has(code)) {
         generatedCodes.add(code);
         codes.push({
           code,
           expires_at: expiresAt.toISOString(),
+          created_by_admin_id: authUser.id,
         });
       }
     }
 
-    // Insert codes into database
-    const { data: insertedCodes, error: insertError } = await supabase
+    const { data: insertedCodes, error: insertError } = await supabaseAdmin
       .from('activation_codes')
       .insert(codes)
       .select();
@@ -112,7 +143,7 @@ Deno.serve(async (req: Request) => {
     if (insertError) {
       console.error('Error inserting codes:', insertError);
       return new Response(
-        JSON.stringify({ error: 'Failed to insert codes into database' }),
+        JSON.stringify({ error: 'Échec de l\'insertion des codes' }),
         {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -135,7 +166,7 @@ Deno.serve(async (req: Request) => {
   } catch (err: any) {
     console.error('Unexpected error:', err);
     return new Response(
-      JSON.stringify({ error: err.message || 'Internal server error' }),
+      JSON.stringify({ error: err.message || 'Erreur interne du serveur' }),
       {
         status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },

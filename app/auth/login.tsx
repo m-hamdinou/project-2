@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, KeyboardAvoidingView, Platform, TouchableOpacity, Switch } from 'react-native';
+import { View, Text, StyleSheet, KeyboardAvoidingView, Platform, TouchableOpacity } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowLeft } from 'lucide-react-native';
@@ -15,7 +15,6 @@ export default function LoginScreen() {
 
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
-  const [stayConnected, setStayConnected] = useState(true);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -38,7 +37,7 @@ export default function LoginScreen() {
     if (!validate()) return;
 
     setLoading(true);
-    const result = await login(phone, password, stayConnected);
+    const result = await login(phone, password);
     setLoading(false);
 
     if (result.success) {
@@ -89,22 +88,6 @@ export default function LoginScreen() {
               error={errors.password}
               required
             />
-
-            <TouchableOpacity
-              style={[styles.stayConnectedRow, isRTL && styles.stayConnectedRowRTL]}
-              onPress={() => setStayConnected(!stayConnected)}
-              activeOpacity={0.7}
-            >
-              <Switch
-                value={stayConnected}
-                onValueChange={setStayConnected}
-                trackColor={{ false: colors.border, true: colors.primaryLight }}
-                thumbColor={stayConnected ? colors.primary : colors.textLight}
-              />
-              <Text style={[styles.stayConnectedText, isRTL && styles.stayConnectedTextRTL]}>
-                {t.auth.stayConnected}
-              </Text>
-            </TouchableOpacity>
 
             <Button
               title={t.auth.login}

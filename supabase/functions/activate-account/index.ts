@@ -7,7 +7,6 @@ const corsHeaders = {
 };
 
 interface ActivateAccountRequest {
-  userId: string;
   code: string;
 }
 
@@ -20,12 +19,49 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    // Parse request body
-    const { userId, code }: ActivateAccountRequest = await req.json();
-
-    if (!userId || !code) {
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
       return new Response(
-        JSON.stringify({ error: 'User ID and code are required' }),
+        JSON.stringify({ error: 'Non authentifié' }),
+        {
+          status: 401,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
+    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+
+    const supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
+      global: {
+        headers: {
+          Authorization: authHeader,
+        },
+      },
+    });
+
+    const {
+      data: { user: authUser },
+      error: authError,
+    } = await supabaseClient.auth.getUser();
+
+    if (authError || !authUser) {
+      return new Response(
+        JSON.stringify({ error: 'Non authentifié' }),
+        {
+          status: 401,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    const { code }: ActivateAccountRequest = await req.json();
+
+    if (!code) {
+      return new Response(
+        JSON.stringify({ error: 'Code requis' }),
         {
           status: 400,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -33,24 +69,19 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Create Supabase client with service role
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Normalize code
     const normalizedCode = code.trim().toUpperCase();
 
-    // Check if user exists and is pending
-    const { data: user, error: userError } = await supabase
-      .from('users')
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from('profiles')
       .select('id, status')
-      .eq('id', userId)
+      .eq('id', authUser.id)
       .maybeSingle();
 
-    if (userError || !user) {
+    if (profileError || !profile) {
       return new Response(
-        JSON.stringify({ error: 'Utilisateur introuvable' }),
+        JSON.stringify({ error: 'Profil introuvable' }),
         {
           status: 404,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -58,19 +89,19 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    if (user.status === 'active') {
+    if (profile.status === 'active') {
       return new Response(
-        JSON.stringify({ error: 'Compte déjà activé' }),
+        JSON.stringify({ success: true, message: 'Compte déjà activé' }),
         {
-          status: 400,
+          status: 200,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         }
       );
     }
 
-    if (user.status === 'blocked') {
+    if (profile.status === 'blocked') {
       return new Response(
-        JSON.stringify({ error: 'Compte bloqué' }),
+        JSON.stringify({ error: 'Compte bloqué. Contactez le support.' }),
         {
           status: 403,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -78,8 +109,7 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Check if code exists and is valid
-    const { data: activationCode, error: codeError } = await supabase
+    const { data: activationCode, error: codeError } = await supabaseAdmin
       .from('activation_codes')
       .select('*')
       .eq('code', normalizedCode)
@@ -95,8 +125,7 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Check if code is already used
-    if (activationCode.used) {
+    if (activationCode.status === 'used') {
       return new Response(
         JSON.stringify({ error: 'Ce code a déjà été utilisé' }),
         {
@@ -106,10 +135,24 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Check if code is expired
+    if (activationCode.status === 'revoked') {
+      return new Response(
+        JSON.stringify({ error: 'Ce code a été révoqué' }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
     const now = new Date();
     const expiresAt = new Date(activationCode.expires_at);
     if (now > expiresAt) {
+      await supabaseAdmin
+        .from('activation_codes')
+        .update({ status: 'expired' })
+        .eq('code', normalizedCode);
+
       return new Response(
         JSON.stringify({ error: 'Ce code a expiré' }),
         {
@@ -119,13 +162,12 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Update activation code as used
-    const { error: updateCodeError } = await supabase
+    const { error: updateCodeError } = await supabaseAdmin
       .from('activation_codes')
       .update({
-        used: true,
-        used_by: userId,
-        used_at: new Date().toISOString(),
+        status: 'used',
+        used_by: authUser.id,
+        used_at: now.toISOString(),
       })
       .eq('code', normalizedCode);
 
@@ -140,17 +182,26 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Update user status to active
-    const { error: updateUserError } = await supabase
-      .from('users')
+    const { error: updateProfileError } = await supabaseAdmin
+      .from('profiles')
       .update({
         status: 'active',
-        activated_at: new Date().toISOString(),
+        activated_at: now.toISOString(),
       })
-      .eq('id', userId);
+      .eq('id', authUser.id);
 
-    if (updateUserError) {
-      console.error('Error updating user:', updateUserError);
+    if (updateProfileError) {
+      console.error('Error updating profile:', updateProfileError);
+
+      await supabaseAdmin
+        .from('activation_codes')
+        .update({
+          status: 'pending',
+          used_by: null,
+          used_at: null,
+        })
+        .eq('code', normalizedCode);
+
       return new Response(
         JSON.stringify({ error: 'Erreur lors de l\'activation du compte' }),
         {

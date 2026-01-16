@@ -10,7 +10,7 @@ import {
   Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { ShieldCheck, MessageCircle, Mail } from 'lucide-react-native';
+import { ShieldCheck, MessageCircle } from 'lucide-react-native';
 import { Input } from '@/components/ui';
 import { colors } from '@/lib/theme/colors';
 import { useLanguage } from '@/lib/i18n/LanguageContext';
@@ -26,7 +26,7 @@ const spacing = {
 
 export default function ActivationScreen() {
   const { t } = useLanguage();
-  const { user, refreshUserStatus, logout } = useAuth();
+  const { user, session, refreshUserStatus, logout } = useAuth();
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -37,8 +37,8 @@ export default function ActivationScreen() {
       return;
     }
 
-    if (!user?.id) {
-      setError('Utilisateur non connecté');
+    if (!session) {
+      setError('Session non valide. Veuillez vous reconnecter.');
       return;
     }
 
@@ -46,30 +46,34 @@ export default function ActivationScreen() {
     setError('');
 
     try {
-      const { supabase } = await import('@/lib/supabase');
+      const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL!;
+      const functionUrl = `${supabaseUrl}/functions/v1/activate-account`;
 
-      const { data, error } = await supabase.rpc('activate_user_with_code', {
-        p_user_id: user.id,
-        p_code: code.trim(),
+      const response = await fetch(functionUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          code: code.trim(),
+        }),
       });
 
-      if (error) {
-        throw new Error(error.message);
+      const data = await response.json();
+
+      if (!response.ok || data.error) {
+        throw new Error(data.error || 'Échec de l\'activation');
       }
 
-      if (!data.success) {
-        throw new Error(data.error || 'Activation failed');
-      }
-
-      // Refresh user profile to get updated status
       await refreshUserStatus();
 
-      // Success
       Alert.alert(
         t.activation?.successTitle || 'Succès',
-        t.activation?.successMessage || 'Votre compte a été activé avec succès !',
+        data.message || t.activation?.successMessage || 'Votre compte a été activé avec succès !',
       );
     } catch (err: any) {
+      console.error('Activation error:', err);
       setError(err.message || t.common?.error || 'Une erreur est survenue');
     } finally {
       setLoading(false);
@@ -84,7 +88,7 @@ export default function ActivationScreen() {
         {
           text: 'WhatsApp',
           onPress: () => {
-            const phone = '+22231466868'; // Replace with actual support number
+            const phone = '+22231466868';
             const message = encodeURIComponent('Bonjour, j\'ai besoin d\'aide pour activer mon compte');
             const url = Platform.OS === 'ios'
               ? `whatsapp://send?phone=${phone}&text=${message}`
@@ -97,7 +101,7 @@ export default function ActivationScreen() {
         {
           text: 'Email',
           onPress: () => {
-            const email = 'mihamdinou@gmail.com'; // Replace with actual support email
+            const email = 'mihamdinou@gmail.com';
             const subject = encodeURIComponent('Demande d\'activation de compte');
             const body = encodeURIComponent(`Bonjour,\n\nJ'ai besoin d'aide pour activer mon compte.\n\nTéléphone: ${user?.phone}\n\nMerci`);
             Linking.openURL(`mailto:${email}?subject=${subject}&body=${body}`);

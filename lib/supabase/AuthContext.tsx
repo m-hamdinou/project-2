@@ -1,229 +1,203 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './client';
+import type { Profile, RegisterData, AuthState } from '../types/auth';
+import type { Session } from '@supabase/supabase-js';
 
-interface User {
-  id: string;
-  phone: string;
-  shop_name: string;
-  shop_address: string;
-  shop_logo_url: string;
-  language: string;
-  currency: string;
-  status: 'pending' | 'active' | 'blocked';
-  activated_at?: string;
-  role: 'user' | 'admin';
-}
-
-interface AuthContextType {
-  user: User | null;
-  isLoading: boolean;
-  isAuthenticated: boolean;
-  isPending: boolean;
-  isActive: boolean;
-  isBlocked: boolean;
-  isAdmin: boolean;
-  login: (phone: string, password: string, stayConnected: boolean) => Promise<{ success: boolean; error?: string }>;
+interface AuthContextType extends AuthState {
+  session: Session | null;
+  login: (phone: string, password: string) => Promise<{ success: boolean; error?: string }>;
   register: (data: RegisterData) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
-  updateProfile: (data: Partial<User>) => Promise<{ success: boolean; error?: string }>;
+  updateProfile: (data: Partial<Profile>) => Promise<{ success: boolean; error?: string }>;
   refreshUserStatus: () => Promise<void>;
-}
-
-interface RegisterData {
-  phone: string;
-  password: string;
-  shopName?: string;
-  shopAddress?: string;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const USER_STORAGE_KEY = '@fatora_user';
-const SESSION_STORAGE_KEY = '@fatora_session';
-
-function hashPassword(password: string): string {
-  let hash = 0;
-  for (let i = 0; i < password.length; i++) {
-    const char = password.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  return hash.toString(16) + '_' + password.length + '_' + btoa(password).slice(0, 10);
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<Profile | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    loadSession();
-  }, []);
-
-  const loadSession = async () => {
+  const fetchProfile = useCallback(async (userId: string): Promise<Profile | null> => {
     try {
-      const [sessionData, cachedUser] = await Promise.all([
-        AsyncStorage.getItem(SESSION_STORAGE_KEY),
-        AsyncStorage.getItem(USER_STORAGE_KEY)
-      ]);
-
-      if (sessionData) {
-        const { userId, stayConnected, timestamp } = JSON.parse(sessionData);
-        const daysSinceLogin = (Date.now() - timestamp) / (1000 * 60 * 60 * 24);
-
-        if (stayConnected || daysSinceLogin < 1) {
-          if (cachedUser) {
-            setUser(JSON.parse(cachedUser));
-            setIsLoading(false);
-          }
-
-          const { data, error } = await supabase
-            .from('users')
-            .select('*')
-            .eq('id', userId)
-            .maybeSingle();
-
-          if (data && !error) {
-            setUser(data);
-            await AsyncStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data));
-          } else {
-            await AsyncStorage.multiRemove([SESSION_STORAGE_KEY, USER_STORAGE_KEY]);
-            setUser(null);
-          }
-        } else {
-          await AsyncStorage.multiRemove([SESSION_STORAGE_KEY, USER_STORAGE_KEY]);
-        }
-      }
-    } catch (error) {
-      console.error('Error loading session:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const login = useCallback(async (phone: string, password: string, stayConnected: boolean) => {
-    try {
-      const normalizedPhone = phone.replace(/\s/g, '');
-      const passwordHash = hashPassword(password);
-
       const { data, error } = await supabase
-        .from('users')
+        .from('profiles')
         .select('*')
-        .eq('phone', normalizedPhone)
+        .eq('id', userId)
         .maybeSingle();
 
       if (error) {
-        return { success: false, error: 'connectionRequired' };
+        console.error('Error fetching profile:', error);
+        return null;
       }
 
-      if (!data) {
-        return { success: false, error: 'invalidPhone' };
-      }
-
-      if (data.password_hash !== passwordHash) {
-        return { success: false, error: 'wrongPassword' };
-      }
-
-      setUser(data);
-      await Promise.all([
-        AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
-          userId: data.id,
-          stayConnected,
-          timestamp: Date.now(),
-        })),
-        AsyncStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data))
-      ]);
-
-      return { success: true };
+      return data;
     } catch (error) {
-      console.error('Login error:', error);
-      return { success: false, error: 'connectionRequired' };
+      console.error('Error fetching profile:', error);
+      return null;
     }
   }, []);
 
-  const register = useCallback(async (data: RegisterData) => {
+  const setupSession = useCallback(async (newSession: Session | null) => {
+    setSession(newSession);
+
+    if (newSession?.user) {
+      const profile = await fetchProfile(newSession.user.id);
+      setUser(profile);
+    } else {
+      setUser(null);
+    }
+  }, [fetchProfile]);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session: currentSession } }) => {
+      (async () => {
+        await setupSession(currentSession);
+        setIsLoading(false);
+      })();
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      (async () => {
+        await setupSession(newSession);
+      })();
+    });
+
+    return () => subscription.unsubscribe();
+  }, [setupSession]);
+
+  const register = useCallback(async (data: RegisterData): Promise<{ success: boolean; error?: string }> => {
     try {
       const normalizedPhone = data.phone.replace(/\s/g, '');
 
-      const { data: existingUser } = await supabase
-        .from('users')
+      const { data: existingProfile } = await supabase
+        .from('profiles')
         .select('id')
         .eq('phone', normalizedPhone)
         .maybeSingle();
 
-      if (existingUser) {
+      if (existingProfile) {
         return { success: false, error: 'phoneAlreadyUsed' };
       }
 
-      const passwordHash = hashPassword(data.password);
+      const email = `${normalizedPhone}@fatora.local`;
 
-      const { data: newUser, error } = await supabase
-        .from('users')
-        .insert({
+      const { data: authData, error: signUpError } = await supabase.auth.signUp({
+        email,
+        password: data.password,
+        phone: normalizedPhone,
+        options: {
+          data: {
+            phone: normalizedPhone,
+          },
+        },
+      });
+
+      if (signUpError) {
+        console.error('Sign up error:', signUpError);
+        return { success: false, error: 'registrationFailed' };
+      }
+
+      if (!authData.user) {
+        return { success: false, error: 'registrationFailed' };
+      }
+
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .update({
           phone: normalizedPhone,
-          password_hash: passwordHash,
           shop_name: data.shopName || '',
           shop_address: data.shopAddress || '',
         })
-        .select()
-        .single();
+        .eq('id', authData.user.id);
 
-      if (error) {
-        console.error('Registration error:', error);
-        return { success: false, error: 'connectionRequired' };
+      if (profileError) {
+        console.error('Profile update error:', profileError);
       }
 
-      setUser(newUser);
-      await Promise.all([
-        AsyncStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
-          userId: newUser.id,
-          stayConnected: true,
-          timestamp: Date.now(),
-        })),
-        AsyncStorage.setItem(USER_STORAGE_KEY, JSON.stringify(newUser))
-      ]);
+      const profile = await fetchProfile(authData.user.id);
+      setUser(profile);
 
       return { success: true };
     } catch (error) {
       console.error('Registration error:', error);
       return { success: false, error: 'connectionRequired' };
     }
-  }, []);
+  }, [fetchProfile]);
+
+  const login = useCallback(async (phone: string, password: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const normalizedPhone = phone.replace(/\s/g, '');
+      const email = `${normalizedPhone}@fatora.local`;
+
+      const { data: authData, error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (signInError) {
+        if (signInError.message.includes('Invalid login credentials')) {
+          return { success: false, error: 'invalidCredentials' };
+        }
+        console.error('Sign in error:', signInError);
+        return { success: false, error: 'connectionRequired' };
+      }
+
+      if (!authData.user) {
+        return { success: false, error: 'invalidCredentials' };
+      }
+
+      const profile = await fetchProfile(authData.user.id);
+
+      if (!profile) {
+        return { success: false, error: 'profileNotFound' };
+      }
+
+      setUser(profile);
+      return { success: true };
+    } catch (error) {
+      console.error('Login error:', error);
+      return { success: false, error: 'connectionRequired' };
+    }
+  }, [fetchProfile]);
 
   const logout = useCallback(async () => {
     try {
-      await AsyncStorage.multiRemove([SESSION_STORAGE_KEY, USER_STORAGE_KEY]);
+      await supabase.auth.signOut();
       setUser(null);
+      setSession(null);
     } catch (error) {
       console.error('Logout error:', error);
     }
   }, []);
 
-  const updateProfile = useCallback(async (data: Partial<User>) => {
+  const updateProfile = useCallback(async (data: Partial<Profile>): Promise<{ success: boolean; error?: string }> => {
     if (!user) {
       return { success: false, error: 'Not authenticated' };
     }
 
     try {
       const { error } = await supabase
-        .from('users')
+        .from('profiles')
         .update({
           shop_name: data.shop_name,
           shop_address: data.shop_address,
           shop_logo_url: data.shop_logo_url,
           language: data.language,
           currency: data.currency,
-          updated_at: new Date().toISOString(),
         })
         .eq('id', user.id);
 
       if (error) {
-        return { success: false, error: 'connectionRequired' };
+        console.error('Update profile error:', error);
+        return { success: false, error: 'updateFailed' };
       }
 
-      const updatedUser = { ...user, ...data };
-      setUser(updatedUser);
-      await AsyncStorage.setItem(USER_STORAGE_KEY, JSON.stringify(updatedUser));
+      const updatedProfile = { ...user, ...data };
+      setUser(updatedProfile);
       return { success: true };
     } catch (error) {
       console.error('Update profile error:', error);
@@ -235,25 +209,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!user) return;
 
     try {
-      const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', user.id)
-        .maybeSingle();
-
-      if (data && !error) {
-        setUser(data);
-        await AsyncStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data));
+      const profile = await fetchProfile(user.id);
+      if (profile) {
+        setUser(profile);
       }
     } catch (error) {
       console.error('Refresh user status error:', error);
     }
-  }, [user]);
+  }, [user, fetchProfile]);
 
   const value: AuthContextType = {
     user,
+    session,
     isLoading,
-    isAuthenticated: !!user,
+    isAuthenticated: !!user && !!session,
     isPending: user?.status === 'pending',
     isActive: user?.status === 'active',
     isBlocked: user?.status === 'blocked',
